@@ -1,0 +1,250 @@
+<!doctype html>
+<html lang="th">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>สถานะระดับน้ำ (Serial → Web)</title>
+  <style>
+    :root { --bg:#0b1020; --card:#12182c; --ink:#e8ecff; --muted:#a9b4d4; --ok:#19c37d; --warn:#f5a623; --bad:#ff4d4f; --chip:#1a2140; }
+    *{box-sizing:border-box} body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;background:linear-gradient(180deg,#0b1020,#0d1230);}
+    header{padding:20px 16px;display:flex;gap:12px;align-items:center;justify-content:space-between;color:var(--ink)}
+    h1{font-size:20px;margin:0}
+    main{max-width:900px;margin:0 auto;padding:16px;display:grid;gap:16px}
+    .row{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:16px}
+    .card{background:var(--card);color:var(--ink);border:1px solid #24305a;border-radius:16px;padding:16px;box-shadow:0 8px 32px rgba(0,0,0,.35)}
+    .muted{color:var(--muted);font-size:14px}
+    .big{font-size:40px;font-weight:700;letter-spacing:0.5px}
+    .chip{display:inline-flex;align-items:center;gap:8px;background:var(--chip);border:1px solid #2a355f;color:var(--ink);padding:6px 10px;border-radius:999px;font-size:13px}
+    .status{display:flex;flex-direction:column;gap:10px}
+    .pill{display:flex;justify-content:space-between;align-items:center;padding:12px 14px;border-radius:12px;border:1px solid #2a355f;background:#0f1530}
+    .pill small{color:var(--muted)}
+    .pill.safe{border-color:color-mix(in oklab, var(--ok) 60%, #2a355f);box-shadow:0 0 0 1px color-mix(in oklab, var(--ok) 40%, transparent)}
+    .pill.warn{border-color:color-mix(in oklab, var(--warn) 60%, #2a355f);box-shadow:0 0 0 1px color-mix(in oklab, var(--warn) 40%, transparent)}
+    .pill.danger{border-color:color-mix(in oklab, var(--bad) 60%, #2a355f);box-shadow:0 0 0 1px color-mix(in oklab, var(--bad) 40%, transparent)}
+    button{appearance:none;background:#1f2a52;border:1px solid #2f3a6a;color:#e8ecff;padding:10px 14px;border-radius:10px;font-weight:600;cursor:pointer}
+    button.primary{background:#3242a8;border-color:#4050bf}
+    button:disabled{opacity:.6;cursor:not-allowed}
+    footer{color:var(--muted);text-align:center;padding:14px}
+    code.inline{background:#0e1430;border:1px solid #232f5c;padding:2px 6px;border-radius:6px}
+  </style>
+</head>
+<body>
+  <header>
+    <h1>สถานะระดับน้ำ (Arduino ↔ Web Serial)</h1>
+    <div>
+      <button id="btnConnect" class="primary">Connect</button>
+      <button id="btnDisconnect" disabled>Disconnect</button>
+    </div>
+  </header>
+
+  <main>
+    <div class="row">
+      <div class="card">
+        <div class="muted">ระยะจากเซ็นเซอร์</div>
+        <div id="distance" class="big">— cm</div>
+        <div id="levelChip" class="chip" style="margin-top:10px">สถานะ: —</div>
+        <div class="muted" style="margin-top:10px">
+          อ่านจาก <code class="inline">Serial</code> ทุกบรรทัด (รองรับทั้งเลขล้วนและ JSON {"distance_cm":12.3,"level":"WARN"})
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="muted">พอร์ต</div>
+        <div id="portName" class="big" style="font-size:22px">—</div>
+        <div class="muted" id="baudInfo" style="margin-top:8px">Baud: 9600</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="muted" style="margin-bottom:8px">สถานะขาออก (ตีความจากระยะตามเงื่อนไขในสเก็ตช์)</div>
+      <div class="status">
+        <div class="pill safe"   id="pin8"><span><b>ขา 8</b> — ปลอดภัย</span><small>LED Safe</small></div>
+        <div class="pill warn"   id="pin13"><span><b>ขา 13</b> — ระวัง</span><small>LED Watch</small></div>
+        <div class="pill danger" id="pin11"><span><b>ขา 11</b> — อันตราย</span><small>LED Flood</small></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="muted">Log</div>
+      <pre id="log" style="white-space:pre-wrap;max-height:220px;overflow:auto;margin-top:8px;background:#0d1330;border:1px solid #232f5c;border-radius:10px;padding:10px"></pre>
+    </div>
+  </main>
+
+  <footer>
+    ถ้าไม่ได้ค่า ให้เช็กว่าเปิดผ่าน <b>https</b> / <b>localhost</b> และ Browser รองรับ <code class="inline">navigator.serial</code>
+  </footer>
+
+<script>
+(() => {
+  // ====== ปรับให้ตรงกับสเก็ตช์ของมึง ======
+  const BAUD = 9600;           // Serial.begin(9600)
+  const T_FLOOD = 10;          // <10 → อันตราย (ขา 11)
+  const T_WARN  = 20;          // <20 → ระวัง   (ขา 13)
+  // >=20 → ปลอดภัย (ขา 8)
+
+  // ====== DOM ======
+  const elConnect = document.getElementById('btnConnect');
+  const elDisconnect = document.getElementById('btnDisconnect');
+  const elDistance = document.getElementById('distance');
+  const elLevelChip = document.getElementById('levelChip');
+  const elPortName = document.getElementById('portName');
+  const elBaud = document.getElementById('baudInfo');
+  const elLog = document.getElementById('log');
+  const elPin8  = document.getElementById('pin8');
+  const elPin11 = document.getElementById('pin11');
+  const elPin13 = document.getElementById('pin13');
+
+  // ====== Serial State ======
+  let port = null;
+  let reader = null;
+  let keepReading = false;
+
+  function setButtons(connected) {
+    elConnect.disabled = connected;
+    elDisconnect.disabled = !connected;
+  }
+
+  function log(...args) {
+    const line = args.map(x => typeof x === 'string' ? x : JSON.stringify(x)).join(' ');
+    elLog.textContent = (line + '\n') + elLog.textContent;
+  }
+
+  function setLevelUI(levelStr, distanceCm) {
+    elDistance.textContent = Number.isFinite(distanceCm) ? `${distanceCm.toFixed(1)} cm` : '— cm';
+
+    // reset outlines (just visual,สถานะจริงคือข้อความ)
+    [elPin8, elPin11, elPin13].forEach(p => p.style.opacity = 0.6);
+    let label = '—';
+    if (levelStr === 'FLOOD') {
+      elPin11.style.opacity = 1.0;
+      label = 'อันตราย (11)';
+    } else if (levelStr === 'WARN') {
+      elPin13.style.opacity = 1.0;
+      label = 'ระวัง (13)';
+    } else if (levelStr === 'SAFE') {
+      elPin8.style.opacity = 1.0;
+      label = 'ปลอดภัย (8)';
+    }
+
+    elLevelChip.textContent = `สถานะ: ${label}`;
+  }
+
+  function inferLevelFromDistance(cm) {
+    if (!Number.isFinite(cm)) return null;
+    if (cm < T_FLOOD) return 'FLOOD';
+    if (cm < T_WARN)  return 'WARN';
+    return 'SAFE';
+  }
+
+  function parseLineToReading(line) {
+    line = line.trim();
+    if (!line) return null;
+
+    // รองรับแบบ JSON {"distance_cm":12.3,"level":"WARN"}
+    if (line.startsWith('{') && line.endsWith('}')) {
+      try {
+        const o = JSON.parse(line);
+        const d = Number(o.distance_cm);
+        const level = typeof o.level === 'string' ? o.level : inferLevelFromDistance(d);
+        return { distance: Number.isFinite(d) ? d : NaN, level };
+      } catch (e) {
+        // ถ้า JSON เพี้ยน จะลอง parse เลขล้วนต่อ
+      }
+    }
+
+    // แบบเลขล้วนจาก Serial.println(distance)
+    const d = Number(line);
+    if (Number.isFinite(d)) {
+      return { distance: d, level: inferLevelFromDistance(d) };
+    }
+
+    return null;
+  }
+
+  async function connect() {
+    try {
+      if (!('serial' in navigator)) {
+        alert('เบราว์เซอร์ไม่รองรับ Web Serial API (ใช้ Chrome/Edge เดสก์ท็อป)');
+        return;
+      }
+
+      port = await navigator.serial.requestPort();
+      await port.open({ baudRate: BAUD });
+
+      elPortName.textContent = 'Connected';
+      elBaud.textContent = `Baud: ${BAUD}`;
+      setButtons(true);
+      keepReading = true;
+
+      const textDecoder = new TextDecoderStream();
+      const readableStreamClosed = port.readable.pipeTo(textDecoder.writable).catch(() => {});
+      const readerLocal = textDecoder.readable.getReader();
+      reader = readerLocal;
+
+      let buffer = '';
+      setLevelUI(null, NaN);
+
+      log('✅ Connected. Waiting for data...');
+
+      while (keepReading) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        if (value) {
+          buffer += value;
+          // แยกบรรทัด
+          let idx;
+          while ((idx = buffer.indexOf('\n')) >= 0) {
+            const line = buffer.slice(0, idx);
+            buffer = buffer.slice(idx + 1);
+
+            const reading = parseLineToReading(line);
+            if (reading) {
+              setLevelUI(reading.level, reading.distance);
+            }
+            // log raw for debug
+            if (line.trim()) log(line.trim());
+          }
+        }
+      }
+
+      reader.releaseLock();
+      await readableStreamClosed;
+    } catch (err) {
+      console.error(err);
+      log('❌ Error:', err.message || err);
+      alert('เชื่อมต่อพอร์ตไม่สำเร็จ / ถูกยกเลิก');
+      await disconnect(); // cleanup
+    }
+  }
+
+  async function disconnect() {
+    try {
+      keepReading = false;
+      if (reader) {
+        try { await reader.cancel(); } catch {}
+        try { reader.releaseLock(); } catch {}
+      }
+      if (port) {
+        try { await port.close(); } catch {}
+      }
+    } finally {
+      reader = null;
+      port = null;
+      setButtons(false);
+      elPortName.textContent = '—';
+      setLevelUI(null, NaN);
+      log('🔌 Disconnected');
+    }
+  }
+
+  elConnect.addEventListener('click', connect);
+  elDisconnect.addEventListener('click', disconnect);
+
+  // ถ้าพอร์ตโดนดึงออก
+  navigator.serial?.addEventListener?.('disconnect', (e) => {
+    if (port && e.target === port) disconnect();
+  });
+})();
+</script>
+</body>
+</html>
